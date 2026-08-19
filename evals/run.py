@@ -25,9 +25,10 @@ from models import MetadataResult, create_model
 from prompts import sync_extraction_prompt
 from pydantic_ai import Agent
 
-DATASET_ROOT = Path("full-dataset")
-DATASET_NAME = "results-with-all-tools"
-EXPERIMENT_NAME = "results-with-all-tools"
+DATASET_ROOT = Path("evals/dataset")
+DATASET_NAME = "KPIs_August_2026"
+DEFAULT_EXPERIMENT_NAME = "KPIs_August_2026"
+
 
 
 def extract_text(pdf_path: Path, extractor_name: str, pages: list[int] | None = None):
@@ -89,14 +90,21 @@ async def extraction_task(dataset_item, agent: Agent, extractor: str = "pdfplumb
     input_data = dataset_item.get("input")
     pdf_path = Path(input_data.get("pdf_path"))
     expected = dataset_item.get("expected_output")
+    record_id = input_data.get("record_id") or pdf_path.stem
 
     # Extract text from pdf
     text = extract_text(pdf_path, extractor, [1, 2])
+    save_extracted_text(text, record_id, DATASET_ROOT)
 
     # Run model
     output = await _run_agent(agent, text)
     output_dict = output.model_dump(mode="json")
-    output_dict["comparison"] = build_comparison_payload(output_dict, expected)
+    output_dict["comparison"] = build_comparison_payload(
+        output_dict,
+        expected,
+        DATASET_ROOT,
+        record_id=record_id,
+    )
 
     return {
         "pdf_filename": pdf_path.name,
@@ -134,8 +142,15 @@ async def run(
             extractor=extractor,
         )
 
+
+
+
+    effective_run_name = f"{extractor}__{os.getenv("LLM")}"
+
+
+
     result = client.run_experiment(
-        name=run_name or EXPERIMENT_NAME,
+        name=effective_run_name,
         description="Extract and evaluate document metadata",
         data=dataset_items,
         metadata={
