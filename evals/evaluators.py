@@ -3,6 +3,8 @@
 
 import re
 from difflib import SequenceMatcher
+from itertools import zip_longest
+from pathlib import Path
 from typing import Any
 
 from langfuse import Evaluation
@@ -23,6 +25,87 @@ def norm_doi(doi: Any) -> str:
     """Normalize a DOI by removing common prefixes."""
     doi = str(doi or "").strip().lower()
     return re.sub(r"^(https?://)?(dx\.)?doi\.org/|^doi:\s*", "", doi)
+
+
+def normalize_text_for_match(text: Any) -> str:
+    """Normalize text for substring matching."""
+    normalized = str(text or "").strip().lower()
+    return re.sub(r"\s+", " ", normalized)
+
+
+def creator_records(source: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return creator rows in the flat app schema."""
+    return [
+        {
+            "name": name,
+            "orcid": orcid,
+            "affiliation": [{"name": affiliation}] if affiliation else [],
+        }
+        for name, orcid, affiliation in zip_longest(
+            source.get("creators") or [],
+            source.get("creator_orcids") or [],
+            source.get("creator_affiliations") or [],
+            fillvalue="",
+        )
+        if name or orcid or affiliation
+    ]
+
+
+def flatten_predicted_values(value: Any) -> list[str]:
+    """Flatten nested prediction structures into comparable text snippets."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (list)):
+        flattened = []
+        for item in value:
+            flattened.extend(flatten_predicted_values(item))
+        return flattened
+    return [str(value)]
+
+
+def load_extracted_text(dataset_root: Path, record_id: str | None) -> str | None:
+    """Load extracted text saved for a dataset record when available."""
+    path = dataset_root / "extracted_text" / f"{record_id}.txt"
+    if not path.exists():
+        return None
+    return path.read_text(encoding="utf-8")
+
+
+def grounding_ratio(normalized_value: str, normalized_text: str) -> float:
+    """Return the fraction of predicted, within extracted text."""
+    if not normalized_value:
+        return 0.0
+    matcher = SequenceMatcher(None, normalized_value, normalized_text, autojunk=False)
+    matched_chars = sum(block.size for block in matcher.get_matching_blocks())
+    return matched_chars / len(normalized_value)
+
+
+def apply_grounding_scores(comparison: dict[str, Any],
+                           extracted_text: str | None) -> None:
+    """Annotate field rows with a grounding score.
+
+    To understand how much of each predicted value can be matched against the source
+    document text.
+    """
+    if not extracted_text:
+        return
+
+    normalized_text = normalize_text_for_match(extracted_text)
+    for field_row in comparison["fields"].values():
+        predicted_values = flatten_predicted_values(field_row.get("predicted"))
+        field_row["predicted_value_count"] = len(predicted_values)
+
+        if not predicted_values:
+            field_row["grounded_score"] = 1.0
+            continue
+
+        value_scores = [
+            grounding_ratio(normalize_text_for_match(predicted_value), normalized_text)
+            for predicted_value in predicted_values
+        ]
+        field_row["grounded_score"] = sum(value_scores) / len(value_scores)
 
 
 def sym_score(exp_vals: list, pred_vals: list, sim: Any) -> tuple[float, bool]:
@@ -222,8 +305,8 @@ class Evaluator:
 
     def creators_eval(self) -> dict[str, dict[str, Any]]:
         """Compare predicted creator names, ORCIDs, and affiliations."""
-        exp_creators = self.exp.get("creators", [])
-        pred_creators = self.pred.get("creators", [])
+        exp_creators = creator_records(self.exp)
+        pred_creators = creator_records(self.pred)
 
         results: dict[str, dict[str, Any]] = {}
 
@@ -331,19 +414,21 @@ class Evaluator:
 def build_comparison_payload(
     predicted_output: dict[str, Any],
     expected_output: dict[str, Any],
+    dataset_root: Path,
+    record_id: str | None = None,
 ) -> dict[str, Any]:
     """Build comparison data using the Evaluator class."""
     evaluator = Evaluator({"expected_output": expected_output}, predicted_output)
-    comparison = evaluator.evaluate()
+    fields = evaluator.evaluate()
 
     diagnostic_only = {"creators_orcid", "creators_affiliation"}
     headline = {
-        name: field for name, field in comparison.items() if name not in diagnostic_only
+        name: field for name, field in fields.items() if name not in diagnostic_only
     }
     gt_fields = [field for field in headline.values() if field["gt_present"]]
     scored = gt_fields or list(headline.values())
 
-    return {
+    payload = {
         "average_score": round(
             sum(field["score"] for field in scored) / len(scored), 4
         ),
@@ -355,8 +440,27 @@ def build_comparison_payload(
             for field in headline.values()
             if not field["gt_present"] and field["score"] < 1.0
         ),
-        "fields": comparison,
+        "fields": fields,
     }
+
+    extracted_text = load_extracted_text(dataset_root, record_id)
+    apply_grounding_scores(payload, extracted_text)
+    fields_with_predictions = [
+        field
+        for field in payload["fields"].values()
+        if field.get("predicted_value_count", 0) > 0
+    ]
+
+    if fields_with_predictions:
+        payload["grounded_average"] = round(
+            sum(field["grounded_score"] for field in fields_with_predictions)
+            / len(fields_with_predictions),
+            4,
+        )
+    else:
+        payload["grounded_average"] = 1.0
+
+    return payload
 
 
 def item_summary_evaluator(
@@ -381,6 +485,7 @@ def item_summary_evaluator(
         )
 
     summary_score = float(comparison.get("average_score", 0.0))
+    grounded_avg = float(comparison.get("grounded_average", 1.0))
     mismatch_count = int(comparison.get("mismatch_count", 0))
     field_count = int(comparison.get("field_count", 0))
 
@@ -391,7 +496,15 @@ def item_summary_evaluator(
             metadata={
                 "mismatch_count": mismatch_count,
                 "field_count": field_count,
+                "grounded_average": grounded_avg,
             },
+        )
+    )
+
+    evals.append(
+        Evaluation(
+            name="grounded_average",
+            value=grounded_avg,
         )
     )
 

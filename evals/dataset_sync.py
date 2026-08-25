@@ -11,6 +11,7 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 import zipfile
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
@@ -240,9 +241,9 @@ def _fetch_current_objects(
     token: str | None,
 ) -> None:
     for entry in _missing(cache, _entries(manifest)):
-        path = quote(entry["path"], safe="/")
-        base = GITHUB_MEDIA if entry["path"].startswith("files/") else GITHUB_RAW
-        response = _get(f"{base}/{repo}/{commit}/{path}", token=token, stream=True)
+        path = quote(unicodedata.normalize("NFC", entry["path"]), safe="/")
+        response = _get(f"{GITHUB_RAW}/{repo}/{commit}/{path}",
+                        token=token, stream=True)
         with response.raw as source:
             source.decode_content = True
             _store_object(source, cache, entry)
@@ -307,19 +308,30 @@ def sync_dataset(
     manifest_bytes = _get(f"{raw_base}/manifest.json", token=token).content
     manifest = json.loads(manifest_bytes)
     _entries(manifest)
-    state = _get(f"{raw_base}/.zenodo-record.json", token=token).json()
+    state = None
+    try:
+        state = _get(f"{raw_base}/.zenodo-record.json", token=token).json()
+    except DatasetSyncError as error:
+        if "404" not in str(error):
+            raise
 
-    _seed_zenodo(cache, state, zenodo_base)
+    if state is not None:
+        _seed_zenodo(cache, state, zenodo_base)
     _fetch_current_objects(cache, manifest, repo, commit, token)
 
-    provenance = {
+    provenance: dict[str, Any] = {
         "dataset_git_commit": commit,
         "dataset_manifest_sha256": _sha256_bytes(manifest_bytes),
         "dataset_repo": repo,
-        "dataset_version": state["version"],
-        "zenodo_doi": state["latest_doi"],
-        "zenodo_record_id": state["latest_recid"],
     }
+    if state is not None:
+        provenance.update(
+            {
+                "dataset_version": state["version"],
+                "zenodo_doi": state["latest_doi"],
+                "zenodo_record_id": state["latest_recid"],
+            }
+        )
     return _materialize(target, cache, manifest, provenance), provenance
 
 
