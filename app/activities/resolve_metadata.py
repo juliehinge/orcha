@@ -4,6 +4,7 @@
 """Activity that resolves funders, awards, and licenses via Invenio vocabularies."""
 
 import asyncio
+import json
 import logging
 from datetime import timedelta
 
@@ -59,6 +60,17 @@ class ResolveMetadataRequest(BaseModel):
     metadata: ExtractedMetadata = Field(description="Raw metadata to resolve")
 
 
+def _log_resolve_error(
+    field: str, instance: str, error: httpx.HTTPError | json.JSONDecodeError
+) -> None:
+    reason = (
+        "request failed"
+        if isinstance(error, httpx.HTTPError)
+        else "invalid JSON response"
+    )
+    logger.error(f"Error resolving {field} {instance} ({reason})", exc_info=error)
+
+
 async def _resolve_license(
     client: httpx.AsyncClient, license_id: str, base_url: str
 ) -> ResolvedLicense:
@@ -75,8 +87,8 @@ async def _resolve_license(
                 description=data.get("description_l10n"),
                 link=data.get("props", {}).get("url"),
             )
-    except Exception:
-        logger.exception("Error resolving license %r", license_id)
+    except (httpx.HTTPError, json.JSONDecodeError) as e:
+        _log_resolve_error("license", license_id, e)
     return ResolvedLicense(id=license_id)
 
 
@@ -106,8 +118,8 @@ async def _resolve_award_by_number(
             number=hit.get("number"),
             title=hit.get("title_l10n"),
         ), ResolvedFunder(id=hit["funder"]["id"], name=hit["funder"]["name"])
-    except Exception:
-        logger.exception("Error resolving award by number %r", number)
+    except (httpx.HTTPError, json.JSONDecodeError) as e:
+        _log_resolve_error("award by number", number, e)
     return None, None
 
 
@@ -143,16 +155,16 @@ async def _resolve_award_by_title(
             number=hit.get("number"),
             title=hit.get("title_l10n"),
         ), ResolvedFunder(id=hit["funder"]["id"], name=hit["funder"]["name"])
-    except Exception:
-        logger.exception("Error resolving award by title %r", title)
+    except (httpx.HTTPError, json.JSONDecodeError) as e:
+        _log_resolve_error("award by title", title, e)
     return None, None
 
 
 async def _resolve_funding_entry(
     client: httpx.AsyncClient,
     funder_name: FunderEnum | None,
-    title: str,
-    number: str,
+    title: str | None,
+    number: str | None,
     base_url: str,
 ) -> ResolvedFunding | None:
     ror_id = FUNDER_ROR_IDS.get(funder_name) if funder_name else None
