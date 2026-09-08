@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-08
+
+### Features
+- *(schema)* Add metadata fields
+- *(workflow)* Add new fields suggestions: funding, license and copyright
+  - Resolve funders, awards and licenses via the `resolve_metadata_suggestions` activity
+  - Split the LLM schema between extracted fields and resolved suggestions
+
+### Fixes
+- *(evals)* Skip Zenodo dataset if not published yet
+- *(agent)* Retry output validation failures: Set `output_retries=2` on the agent to solve output validation issues
+
+### Refactor
+- *(helm)* Tenants.json as a ConfigMap instead of a Persistent Volume Claim
+- *(agent)* Move the LLM agent construction logic from `activities._llm` to a dedicated module `agent`
+- *(activities)* Share HTTP allowlist
+  - Move `_http_verify_for_pdf_url` to `app.activities.utils.http_verify`, generalize its error message, and use it in both activities.
+  - Rename `PDF_HTTP_ALLOWLIST` to `HTTP_ALLOWLIST` to be more accurate, and exposes `INVENIO_BASE_URL` through the chart.
+
 ## [0.5.0] - 2026-08-13
 
 ### Features
@@ -121,7 +140,8 @@
 ## [0.0.1] - 2026-06-09
 _First release._
 
-[unreleased]: https://github.com/inveniosoftware/orcha/compare/v0.5.0...HEAD
+[unreleased]: https://github.com/inveniosoftware/orcha/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/inveniosoftware/orcha/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/inveniosoftware/orcha/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/inveniosoftware/orcha/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/inveniosoftware/orcha/compare/v0.2.2...v0.3.0
