@@ -4,6 +4,8 @@
 """Langfuse dataset management."""
 
 import json
+import random
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +49,8 @@ def load_local_dataset(dataset_root: Path, dataset_name: str) -> list[dict[str, 
 
         # Use first file listed
         pdf_path = dataset_root / file_paths[0]
+        if not pdf_path.exists():
+            continue
         pdf_parts = Path(file_paths[0]).parts
         category = pdf_parts[1] if len(pdf_parts) > 1 else "unknown"
 
@@ -64,6 +68,28 @@ def load_local_dataset(dataset_root: Path, dataset_name: str) -> list[dict[str, 
         )
 
     return items
+
+
+def sample_items(
+    items: list[dict[str, Any]], samples: int | None
+) -> list[dict[str, Any]]:
+    """Return a random subset, sampled proportionally by category."""
+    if samples is None or samples >= len(items):
+        return items
+
+    groups = defaultdict(list)
+    for item in items:
+        groups[item["input"]["category"]].append(item)
+
+    rng = random.Random()
+    selected = []
+
+    for group in groups.values():
+        count = round(len(group) / len(items) * samples)
+        selected.extend(rng.sample(group, min(count, len(group))))
+
+    rng.shuffle(selected)
+    return selected[:samples]
 
 
 def get_or_create_langfuse_dataset(
