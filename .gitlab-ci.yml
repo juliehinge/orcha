@@ -22,6 +22,7 @@ evals:
     - uv run orcha evals sync_dataset
     - mkdir -p app/evals/eval_results
 
+    # Run evaluations and save the output
     - |
       set -o pipefail
       uv run orcha evals run \
@@ -30,22 +31,62 @@ evals:
         --samples 10 \
         | tee app/evals/eval_results/results.md
 
+    # Compare with the previous report and save the new report
     - |
-      git clone "https://oauth2:${EVAL_RESULTS_TOKEN}@${EVAL_RESULTS_REPO#https://}" eval-results-repo
+      set -eu
 
-      if [ -n "$CI_COMMIT_TAG" ]; then
+      git clone \
+        "https://oauth2:${EVAL_RESULTS_TOKEN}@${EVAL_RESULTS_REPO#https://}" \
+        eval-results-repo
+
+      results_dir="eval-results-repo/results"
+      mkdir -p "$results_dir"
+
+      # Determine the filename for this run
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
         filename="${CI_COMMIT_TAG}.md"
       else
         filename="$(date -u +'%Y-%m-%dT%H-%M-%S').md"
       fi
 
-      mkdir -p eval-results-repo/results
-      cp app/evals/eval_results/results.md "eval-results-repo/results/${filename}"
+      current_report="app/evals/eval_results/results.md"
+      comparison="app/evals/eval_results/comparison.md"
+      final_report="app/evals/eval_results/final_report.md"
+
+      # Find the most recent timestamped report
+      previous=$(
+        find "$results_dir" -maxdepth 1 -type f \
+          -name '????-??-??T??-??-??.md' \
+          | sort \
+          | tail -n 1
+      )
+
+      if [ -n "$previous" ]; then
+        echo "Comparing with previous report: $previous"
+
+        uv run python app/evals/compare_results.py \
+          "$previous" \
+          "$current_report" \
+          > "$comparison"
+
+        # Put the comparison before the current evaluation output
+        cat "$comparison" > "$final_report"
+        printf '\n\n---\n\n' >> "$final_report"
+        cat "$current_report" >> "$final_report"
+      else
+        echo "No previous report found; saving results without comparison."
+        cp "$current_report" "$final_report"
+      fi
+
+      # Copy the final report into the results repository
+      cp "$final_report" "${results_dir}/${filename}"
 
       cd eval-results-repo
+
       git config user.name "Orcha CI"
       git config user.email "orcha-ci@gitlab.cern.ch"
-      git add results/
+
+      git add "results/${filename}"
       git commit -m "Add eval results: ${filename}"
       git push
 
