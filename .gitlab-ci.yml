@@ -5,13 +5,6 @@ evals:
   stage: evals
   image: python:3.14
 
-  variables:
-    UV_CACHE_DIR: "$CI_PROJECT_DIR/.uv-cache"
-
-  cache:
-    paths:
-      - .uv-cache/
-
   before_script:
     - curl -LsSf https://astral.sh/uv/install.sh | sh
     - export PATH="$HOME/.local/bin:$PATH"
@@ -22,7 +15,7 @@ evals:
     - uv run orcha evals sync_dataset
     - mkdir -p app/evals/eval_results
 
-    # Run evaluations and save the output
+    # Run evaluation
     - |
       set -o pipefail
       uv run orcha evals run \
@@ -31,63 +24,35 @@ evals:
         --samples 10 \
         | tee app/evals/eval_results/results.md
 
-    # Compare with the previous report and save the new report
+    # Compare with previous report and save
     - |
-      set -eu
-
       git clone \
         "https://oauth2:${EVAL_RESULTS_TOKEN}@${EVAL_RESULTS_REPO#https://}" \
         eval-results-repo
 
       results_dir="eval-results-repo/results"
-      mkdir -p "$results_dir"
+      previous=$(ls "$results_dir"/*.md | sort | tail -n 1)
 
-      # Determine the filename for this run
-      if [ -n "${CI_COMMIT_TAG:-}" ]; then
-        filename="${CI_COMMIT_TAG}.md"
-      else
-        filename="$(date -u +'%Y-%m-%dT%H-%M-%S').md"
-      fi
+      uv run python app/evals/compare_results.py \
+        "$previous" \
+        app/evals/eval_results/results.md \
+        > app/evals/eval_results/comparison.md
 
-      current_report="app/evals/eval_results/results.md"
-      comparison="app/evals/eval_results/comparison.md"
-      final_report="app/evals/eval_results/final_report.md"
+      cat app/evals/eval_results/comparison.md \
+        > app/evals/eval_results/final_report.md
 
-      # Find the most recent timestamped report
-      previous=$(
-        find "$results_dir" -maxdepth 1 -type f \
-          -name '????-??-??T??-??-??.md' \
-          | sort \
-          | tail -n 1
-      )
+      printf '\n\n---\n\n' >> app/evals/eval_results/final_report.md
+      cat app/evals/eval_results/results.md \
+        >> app/evals/eval_results/final_report.md
 
-      if [ -n "$previous" ]; then
-        echo "Comparing with previous report: $previous"
-
-        uv run python app/evals/compare_results.py \
-          "$previous" \
-          "$current_report" \
-          > "$comparison"
-
-        # Put the comparison before the current evaluation output
-        cat "$comparison" > "$final_report"
-        printf '\n\n---\n\n' >> "$final_report"
-        cat "$current_report" >> "$final_report"
-      else
-        echo "No previous report found; saving results without comparison."
-        cp "$current_report" "$final_report"
-      fi
-
-      # Copy the final report into the results repository
-      cp "$final_report" "${results_dir}/${filename}"
+      filename="$(date -u +'%Y-%m-%dT%H-%M-%S').md"
+      cp app/evals/eval_results/final_report.md "$results_dir/$filename"
 
       cd eval-results-repo
-
       git config user.name "Orcha CI"
       git config user.email "orcha-ci@gitlab.cern.ch"
-
-      git add "results/${filename}"
-      git commit -m "Add eval results: ${filename}"
+      git add "results/$filename"
+      git commit -m "Add eval results: $filename"
       git push
 
   artifacts:
