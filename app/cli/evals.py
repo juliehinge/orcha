@@ -7,6 +7,7 @@ from pathlib import Path
 
 import typer
 
+from app.evals.ablation import EXPERIMENT_NAME, AblationRun  # EXPERIMENT
 from app.evals.dataset import CATEGORIES
 from app.evals.dataset_sync import sync_dataset
 from app.evals.run import ITEM_TIMEOUT
@@ -109,12 +110,29 @@ def run(
     target: Path | None = typer.Option(
         None, "--target", help="Target directory for the eval dataset."
     ),
+    # EXPERIMENT (remove before the PR): abstract ablation, see app/evals/ablation.py
+    ablation_run: str | None = typer.Option(
+        None,
+        "--ablation",
+        help="EXPERIMENT: ablation run: baseline, extraction, or full.",
+    ),
+    repeat: int = typer.Option(
+        1, "--repeat", help="EXPERIMENT: repeat number of this ablation cell."
+    ),
+    experiment_name: str = typer.Option(
+        EXPERIMENT_NAME,
+        "--experiment-name",
+        help="EXPERIMENT: Langfuse experiment and dataset name for --ablation.",
+    ),
 ):
     """Run a local metadata extraction evaluation."""
     if model:
         os.environ["LLM"] = model
 
     try:
+        ablation = (  # EXPERIMENT
+            AblationRun(ablation_run, repeat, experiment_name) if ablation_run else None
+        )
         asyncio.run(
             run_evaluation(
                 extractor=extractor,
@@ -129,6 +147,7 @@ def run(
                 results_dir=output,
                 cache=cache,
                 target=target,
+                **({"ablation": ablation} if ablation else {}),  # EXPERIMENT
             )
         )
     except (FileNotFoundError, ValueError) as error:

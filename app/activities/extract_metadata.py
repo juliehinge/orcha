@@ -3,7 +3,9 @@
 
 """LLM-based metadata suggestions activity."""
 
+import logging
 import re
+import unicodedata
 from datetime import timedelta
 from difflib import SequenceMatcher
 
@@ -18,6 +20,8 @@ from app.config import get_settings
 from app.observability import propagate_langfuse_context
 from app.schemas.metadata_suggestions import ExtractedMetadata
 from app.workflows.specs import WorkflowContext
+
+logger = logging.getLogger(__name__)
 
 EXTRACT_METADATA_RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=5),
@@ -61,24 +65,44 @@ def _coverage(value: str, text: str) -> float:
     return matched / len(value) if value else 1.0
 
 
-def _normalize_text(s: str) -> str:
-    return re.sub(r"\s+", " ", str(s or "").casefold()).strip()
+_SUP_SUB_TAGS = re.compile(r"</?su[bp]>")
+_NON_ALNUM = re.compile(r"[\W_]+")
+
+
+def _squash(s: str) -> str:
+    """Reduce text to its letters and digits for the presence check.
+
+    A faithful copy may still differ from the PDF text in ways that don't change
+    its content: repaired spacing and line-break hyphens, ^/_ or <sup> markup,
+    ligatures and math-italic letters (NFKC maps 'ﬁ' -> 'fi', '𝑏' -> 'b'),
+    quotes, dashes, and punctuation. Comparing only letters and digits keeps
+    those copies while invented text still fails.
+    """
+    s = unicodedata.normalize("NFKC", str(s or ""))
+    return _NON_ALNUM.sub("", _SUP_SUB_TAGS.sub("", s).casefold())
 
 
 def _clear_absent_fields(output: ExtractedMetadata, text: str) -> None:
     """Null title/description/doi whose values aren't present in the source text."""
-    normalized_text = _normalize_text(text)
+    squashed_text = _squash(text)
     for field, threshold in _PRESENCE_THRESHOLDS.items():
         value = getattr(output, field)
         if not value:
             continue
 
-        normalized_value = _normalize_text(value)
-        if (
-            normalized_value in normalized_text
-            or _coverage(normalized_value, normalized_text) >= threshold
-        ):
+        squashed_value = _squash(value)
+        if squashed_value in squashed_text:
             continue
+        coverage = _coverage(squashed_value, squashed_text)
+        if coverage >= threshold:
+            continue
+        logger.warning(
+            "Dropping %s not found in source text (coverage %.2f < %.2f): %.120r",
+            field,
+            coverage,
+            threshold,
+            value,
+        )
         setattr(output, field, None)
 
     # DOIs wrap across lines and may carry a URL or 'doi:' prefix: normalize to
@@ -93,15 +117,21 @@ def _clear_absent_fields(output: ExtractedMetadata, text: str) -> None:
                 output.doi = None
 
 
-async def extract_metadata_record(text: str) -> ExtractedMetadata:
+async def extract_metadata_record(
+    text: str,
+    # EXPERIMENT (remove before the PR): ablation hooks used by app/evals/ablation.py
+    output_type: type[ExtractedMetadata] = ExtractedMetadata,
+    presence_check: bool = True,
+) -> ExtractedMetadata:
     """Shared metadata extraction helper without Temporal dependencies."""
     if len(text.strip()) < MIN_TEXT_CHARS:
         # No usable text: skip the LLM entirely rather than let it fabricate.
-        return ExtractedMetadata()
+        return output_type()
 
-    agent = build_agent(get_settings().llm, ExtractedMetadata, INSTRUCTIONS)
+    agent = build_agent(get_settings().llm, output_type, INSTRUCTIONS)
     result = await agent.run(text)
-    _clear_absent_fields(result.output, text)
+    if presence_check:  # EXPERIMENT: the condition only; always check in the PR
+        _clear_absent_fields(result.output, text)
     return result.output
 
 

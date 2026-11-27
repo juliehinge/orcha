@@ -77,6 +77,43 @@ def test_null_absent_doi(doi, kept):
     assert (output.doi == doi) if kept else (output.doi is None)
 
 
+@pytest.mark.parametrize(
+    ("source", "description"),
+    [
+        # fused words, split by the model
+        (
+            "employs Low-GainAvalancheDetector(AC-LGAD)microstripsensors",
+            "employs Low-Gain Avalanche Detector (AC-LGAD) microstrip sensors",
+        ),
+        # line-break hyphenation rejoined
+        (
+            "reduce the theo-\nretical uncertainties",
+            "reduce the theoretical uncertainties",
+        ),
+        # flattened superscript written with ^
+        ("explosion energy ∼1052 erg", "explosion energy ∼10^52 erg"),
+        # ligature and math-italic letters
+        ("a good ﬁt for 𝑏 quarks", "a good fit for b quarks"),
+        # curly quotes and dashes
+        ("the ‘New Physics’ group – 2019", "the 'New Physics' group - 2019"),
+    ],
+)
+def test_presence_check_keeps_repaired_description(source, description):
+    """A description that only repairs extraction artifacts still counts as present."""
+    output = ExtractedMetadata(description=description)
+    _clear_absent_fields(output, source)
+    assert output.description == description
+
+
+def test_presence_check_logs_dropped_field(caplog):
+    """A dropped value is logged with its coverage, so evals can tell drops apart."""
+    output = ExtractedMetadata(description="An invented summary of nothing at all.")
+    with caplog.at_level("WARNING", logger="app.activities.extract_metadata"):
+        _clear_absent_fields(output, SOURCE)
+    assert output.description is None
+    assert "Dropping description" in caplog.text
+
+
 def test_null_absent_wrapped_doi_matches_across_linebreak():
     """A DOI wrapped across a line break still matches (whitespace-insensitive)."""
     output = ExtractedMetadata(doi="10.1234/example.5678")

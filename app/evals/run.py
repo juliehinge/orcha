@@ -19,6 +19,13 @@ from app.activities.extract_metadata import extract_metadata_record
 from app.config import get_settings
 from app.extractors import get_extractor
 
+from .ablation import (  # EXPERIMENT
+    AblationRun,
+    ablation_item_evaluator,
+    ablation_run_evaluator,
+    replay_checks,
+    schema_for,
+)
 from .dataset import (
     filter_categories,
     get_or_create_langfuse_dataset,
@@ -37,7 +44,7 @@ from .prompts import sync_extraction_prompt
 
 logger = logging.getLogger(__name__)
 
-DATASET_NAME = "orcha-eval-dataset"
+DATASET_NAME = "abstract improvements - ablation"
 MAX_CONCURRENT_REQUESTS = 4
 # Seconds one item may take, including LLM retries, before it counts as failed.
 ITEM_TIMEOUT = 120.0
@@ -96,6 +103,7 @@ async def extraction_task(
     dataset_item,
     dataset_root: Path,
     extractor_name: str = "pdfplumber",
+    ablation: AblationRun | None = None,  # EXPERIMENT
 ):
     """Extract text, run the agent, and build evaluator comparison data."""
     input_data = dataset_item.get("input")
@@ -109,14 +117,28 @@ async def extraction_task(
     save_extracted_text(text, record_id, dataset_root)
 
     # Reuse the app's metadata helper without going through Temporal.
-    metadata = await _with_retry(lambda: extract_metadata_record(text))
+    ablation_info = None
+    if ablation:  # EXPERIMENT: keep the raw output, replay every presence check
+        output_type = schema_for(ablation.prompt)
+        raw = await _with_retry(
+            lambda: extract_metadata_record(
+                text, output_type=output_type, presence_check=False
+            )
+        )
+        metadata, ablation_info = replay_checks(raw, text, expected)
+        ablation_info["record_id"] = record_id.strip("_")
+    else:
+        metadata = await _with_retry(lambda: extract_metadata_record(text))
     output_dict = metadata.model_dump(mode="json")
     output_dict["comparison"] = build_comparison_payload(output_dict, expected)
 
-    return {
+    result = {
         "pdf_filename": pdf_path.name,
         "comparison": output_dict["comparison"],
     }
+    if ablation_info:  # EXPERIMENT
+        result["ablation"] = ablation_info
+    return result
 
 
 def _resolve_dataset_root(cache: Path | None, target: Path | None) -> Path:
@@ -152,7 +174,9 @@ def format_scores(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _connect_langfuse(items, prompt_name, ignore_errors=False):
+def _connect_langfuse(
+    items, prompt_name, ignore_errors=False, dataset_name=DATASET_NAME
+):
     """Sync the prompt and dataset to Langfuse.
 
     Returns the client, prompt reference, and Langfuse dataset items, or None
@@ -163,7 +187,7 @@ def _connect_langfuse(items, prompt_name, ignore_errors=False):
 
         client = get_client()
         prompt_ref = sync_extraction_prompt(client, prompt_name)
-        data = get_or_create_langfuse_dataset(client, DATASET_NAME, items)
+        data = get_or_create_langfuse_dataset(client, dataset_name, items)
     except Exception as exc:
         if not ignore_errors:
             raise
@@ -175,7 +199,9 @@ def _connect_langfuse(items, prompt_name, ignore_errors=False):
     return client, prompt_ref, data
 
 
-def _run_langfuse(client, prompt_ref, data, extract, extractor, settings) -> list[dict]:
+def _run_langfuse(
+    client, prompt_ref, data, extract, extractor, settings, ablation=None
+) -> list[dict]:
     """Run the experiment in Langfuse and return its results."""
     results: list[dict] = []
 
@@ -186,21 +212,32 @@ def _run_langfuse(client, prompt_ref, data, extract, extractor, settings) -> lis
         results.append(outcome)
         return outcome
 
+    names: dict[str, Any] = {"name": f"{extractor}__{settings.llm}"}
+    extra_metadata: dict[str, str] = {}
+    evaluators = [item_summary_evaluator]
+    run_evaluators = [average_score_evaluator, classification_run_evaluator]
+    if ablation:  # EXPERIMENT
+        names = {"name": ablation.experiment_name, "run_name": ablation.run_name()}
+        extra_metadata = ablation.metadata()
+        evaluators.append(ablation_item_evaluator)
+        run_evaluators.append(ablation_run_evaluator)
+
     experiment = client.run_experiment(
-        name=f"{extractor}__{settings.llm}",
+        **names,
         description="Extract and evaluate document metadata",
         data=data,
         metadata={
-            "dataset_name": DATASET_NAME,
+            "dataset_name": ablation.experiment_name if ablation else DATASET_NAME,
             "model": settings.llm,
             "extractor": extractor,
             "prompt_name": prompt_ref["name"],
             "prompt_version": str(prompt_ref.get("version")),
             "pages": "1,2",
+            **extra_metadata,
         },
         task=task,
-        evaluators=[item_summary_evaluator],
-        run_evaluators=[average_score_evaluator, classification_run_evaluator],
+        evaluators=evaluators,
+        run_evaluators=run_evaluators,
     )
     print(experiment.format())
     return results
@@ -219,11 +256,23 @@ async def run(
     results_dir: Path | None = None,
     cache: Path | None = None,
     target: Path | None = None,
+    ablation: AblationRun | None = None,  # EXPERIMENT
 ):
     """Run extraction and evaluation experiment."""
+    dataset_name = DATASET_NAME
+    if ablation:  # EXPERIMENT
+        if extractor != "pdfplumber":
+            raise ValueError("--ablation varies pdfplumber settings; use pdfplumber")
+        if samples or categories:
+            logger.warning(
+                "--ablation with --samples/--category: runs only pair up on the "
+                "items they share"
+            )
+        ablation.configure()
+        dataset_name = ablation.experiment_name
     dataset_root = _resolve_dataset_root(cache, target)
     items = filter_categories(
-        load_local_dataset(dataset_root, DATASET_NAME), categories
+        load_local_dataset(dataset_root, dataset_name), categories
     )
     items = sample_items(items, samples, seed)
     settings = get_settings()
@@ -250,6 +299,7 @@ async def run(
                         dataset_item=item,
                         dataset_root=dataset_root,
                         extractor_name=extractor,
+                        ablation=ablation,  # EXPERIMENT
                     ),
                     timeout=item_timeout,
                 )
@@ -266,7 +316,7 @@ async def run(
 
     started = time.perf_counter()
     langfuse = (
-        _connect_langfuse(items, prompt_name, ignore_langfuse_errors)
+        _connect_langfuse(items, prompt_name, ignore_langfuse_errors, dataset_name)
         if use_langfuse
         else None
     )
@@ -280,7 +330,7 @@ async def run(
         if langfuse:
             client, prompt_ref, data = langfuse
             results = _run_langfuse(
-                client, prompt_ref, data, extract, extractor, settings
+                client, prompt_ref, data, extract, extractor, settings, ablation
             )
             run_info = {"langfuse": "ok", "prompt_version": prompt_ref.get("version")}
         else:
@@ -304,6 +354,20 @@ async def run(
             },
         )
         print(f"Wrote {len(results)} results to {path}")
+
+    if ablation:  # EXPERIMENT: always keep the per-item results for the analysis
+        out_dir = PROJECT_ROOT / "experiments/results"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        path = out_dir / f"{ablation.label}__{stamp}.json"
+        payload = {
+            "ablation": ablation.metadata(),
+            "model": settings.llm,
+            "total_items": len(items),
+            "items": results,
+        }
+        path.write_text(json.dumps(payload, indent=1, ensure_ascii=False))
+        print(f"Wrote ablation results to {path}")
 
     print(f"{extractor} / {settings.llm}")
     scores = []

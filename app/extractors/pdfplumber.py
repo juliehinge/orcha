@@ -19,6 +19,13 @@ from .utils import resolve_pages
 _SAME_LINE_PT = 6  # max vertical gap counting word and icon as one line
 _ICON_GAP_PT = 2  # max horizontal gap from the word's right edge to the icon
 
+# Shared by extract_text and extract_words so the ORCID anchors match the text.
+# x_tolerance_ratio scales the word-gap threshold with font size: a fixed
+# x_tolerance fuses tightly set small text ("microstripsensorstoachieve").
+# use_text_flow follows the content stream instead of reading each line across
+# the full page width, which interleaves two-column layouts.
+_TEXT_SETTINGS = {"x_tolerance_ratio": 0.15, "use_text_flow": True}
+
 
 class PdfplumberExtractor(BaseExtractor):
     """Extract content using pdfplumber."""
@@ -42,8 +49,7 @@ class PdfplumberExtractor(BaseExtractor):
             for page_num in page_indices:
                 page = pdf.pages[page_num]
                 page_annots = page.annots or []
-                # x_tolerance=2: the default (3) merges spaced words like "PhilipBull"
-                text = page.extract_text(x_tolerance=2) or ""
+                text = page.extract_text(**_TEXT_SETTINGS) or ""
                 # ORCIDs live only in link annotations. Splice each one next to its
                 # author so the pairing survives; a bare list misaligns when some
                 # authors have no ORCID.
@@ -106,7 +112,7 @@ class PdfplumberExtractor(BaseExtractor):
             if not orcid:
                 continue
             if words is None:
-                words = page.extract_words(x_tolerance=2)
+                words = page.extract_words(**_TEXT_SETTINGS)
             on_line = [
                 i
                 for i, w in enumerate(words)

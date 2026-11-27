@@ -43,9 +43,22 @@ class ExtractedMetadata(BaseModel):
     description: str | None = Field(
         default=None,
         description=(
-            "Abstract or executive summary of the document, copied word-for-word, "
-            "complete and unchanged; never paraphrase, shorten, or write a new "
-            "summary. Null if the document has no abstract or summary."
+            "Abstract or executive summary of the document, copied word-for-word "
+            "in reading order. It is often labeled 'Abstract' or 'Summary', but "
+            "many journals print it unlabeled: then it is the paragraph that "
+            "summarizes the work, right after the title, authors, and "
+            "affiliations and before the introduction. Only repair PDF-extraction "
+            "artifacts: insert missing spaces between fused words "
+            "('microstripsensors' -> 'microstrip sensors'), rejoin words "
+            "hyphenated across line breaks ('theo- retical' -> 'theoretical'), "
+            "and write superscripts and subscripts with ^ and _ "
+            "('10<sup>52</sup>' -> '10^52'). The abstract is one continuous "
+            "passage: leave out interleaved lines from a neighbouring column, "
+            "sidebar, header, or copyright notice, and stop before keywords, the "
+            "introduction, or license text. Never paraphrase, shorten, or write a "
+            "new summary. Null only when no such paragraph exists, as is typical "
+            "for slides and posters; never assemble one from bullet points, "
+            "headings, or body text."
         ),
         examples=["The abstract of the document, word for word."],
     )
